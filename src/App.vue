@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, type Component } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import { saveBookmarks, loadBookmarks } from './utils/storage'
+import { saveBookmarks, loadBookmarks, exportBookmarks, importBookmarks } from './utils/storage'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import {
   Search, Plus, Trash2, Pencil, Bookmark, X, Compass, Briefcase, Tv, Wrench,
   ArrowUpRight, FolderPlus, Folder, FileQuestion, SearchX, Sun, Moon, RotateCw,
-  AlertTriangle, ArrowUpDown, ImagePlus, GripVertical
+  AlertTriangle, ArrowUpDown, ImagePlus, GripVertical, Download, Upload
 } from 'lucide-vue-next'
 
 interface Category {
@@ -558,6 +558,49 @@ watch(currentCategoryName, () => {
   setTimeout(() => { contentFading.value = false }, 180)
 })
 
+// ==================== 导出 / 导入 ====================
+const isExporting = ref(false)
+const handleExport = async () => {
+  if (isExporting.value) return
+  isExporting.value = true
+  try {
+    const saved = await exportBookmarks()
+    if (saved) showToast('已导出书签数据')
+  } catch (e) {
+    showToast('导出失败: ' + e)
+  } finally {
+    isExporting.value = false
+  }
+}
+
+const isImporting = ref(false)
+const handleImport = () => {
+  if (isImporting.value) return
+  showConfirmDialog(
+    '确定要导入吗？',
+    '导入的数据将整体替换当前的书签和分类（当前数据会自动备份一份，可以从系统托盘找到应用数据目录恢复）。',
+    async () => {
+      isImporting.value = true
+      try {
+        const imported = await importBookmarks()
+        if (!imported) return // 用户取消了选择文件
+        categories.value = (imported.categories || []).map(cat => ({
+          ...cat,
+          icon: cat.name === '全部' ? Compass : Folder,
+          isDefault: cat.name === '全部'
+        }))
+        bookmarks.value = imported.bookmarks || []
+        activeIndex.value = 0
+        showToast('导入成功')
+      } catch (e) {
+        showToast('导入失败: ' + e)
+      } finally {
+        isImporting.value = false
+      }
+    }
+  )
+}
+
 const isRefreshing = ref(false)
 const refreshCache = async () => {
   if (isRefreshing.value) return
@@ -819,6 +862,26 @@ onMounted(async () => {
           >
             <ArrowUpDown class="w-4 h-4" />
             <span v-if="sortMode !== 'default'" class="text-xs font-medium pr-0.5">{{ sortLabel }}</span>
+          </button>
+
+          <!-- 导出按钮 -->
+          <button
+            @click="handleExport"
+            :disabled="isExporting"
+            :class="['p-2.5 rounded-2xl border transition-all duration-300 cursor-pointer shadow-2xs active:scale-95 disabled:cursor-not-allowed disabled:opacity-60', isDarkMode ? 'bg-slate-800 border-slate-700 text-slate-300 hover:text-sky-400 hover:bg-slate-800/90' : 'bg-white/90 border-slate-200/80 text-slate-600 hover:text-sky-600 hover:bg-white']"
+            title="导出书签数据到文件"
+          >
+            <Download class="w-4 h-4" />
+          </button>
+
+          <!-- 导入按钮 -->
+          <button
+            @click="handleImport"
+            :disabled="isImporting"
+            :class="['p-2.5 rounded-2xl border transition-all duration-300 cursor-pointer shadow-2xs active:scale-95 disabled:cursor-not-allowed disabled:opacity-60', isDarkMode ? 'bg-slate-800 border-slate-700 text-slate-300 hover:text-sky-400 hover:bg-slate-800/90' : 'bg-white/90 border-slate-200/80 text-slate-600 hover:text-sky-600 hover:bg-white']"
+            title="从文件导入书签数据（会替换当前数据）"
+          >
+            <Upload class="w-4 h-4" />
           </button>
 
           <!-- 刷新缓存按钮 -->

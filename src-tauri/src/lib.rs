@@ -14,6 +14,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_autostart::ManagerExt;
+use tauri_plugin_dialog::DialogExt;
 
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
@@ -152,11 +153,104 @@ fn load_bookmarks(app: tauri::AppHandle) -> Result<String, String> {
     }
 }
 
+// 保存前的自动备份：把"即将被覆盖"的旧内容存一份带时间戳的副本，
+// 只保留最近 MAX_BACKUPS 份，避免误操作/异常写入把数据彻底覆盖丢失
+const MAX_BACKUPS: usize = 10;
+
+fn backups_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("backups");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+fn rotate_backup(app: &tauri::AppHandle, current_path: &PathBuf) {
+    if !current_path.exists() {
+        return; // 第一次保存，没有旧内容可备份
+    }
+    let Ok(dir) = backups_dir(app) else { return };
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let backup_path = dir.join(format!("bookmarks-{}.json", timestamp));
+    if fs::copy(current_path, &backup_path).is_err() {
+        return; // 备份失败不应该阻止本次真正的保存
+    }
+
+    let Ok(read_dir) = fs::read_dir(&dir) else { return };
+    let mut entries: Vec<_> = read_dir.filter_map(|e| e.ok()).collect();
+    entries.sort_by_key(|e| e.file_name());
+    if entries.len() > MAX_BACKUPS {
+        for e in &entries[..entries.len() - MAX_BACKUPS] {
+            let _ = fs::remove_file(e.path());
+        }
+    }
+}
+
 // 3. 保存书签 API
 #[tauri::command]
 fn save_bookmarks(app: tauri::AppHandle, content: String) -> Result<(), String> {
     let path = fixed_bookmarks_path(&app)?;
+    rotate_backup(&app, &path);
     fs::write(path, content).map_err(|e| e.to_string())
+}
+
+// 校验一下导入的文件至少长得像 bookmarks.json（有 categories/bookmarks 数组），
+// 避免把无关文件误导入后覆盖掉现有的真实数据
+fn validate_bookmarks_shape(content: &str) -> Result<(), String> {
+    let value: serde_json::Value = serde_json::from_str(content)
+        .map_err(|e| format!("不是有效的 JSON 文件: {}", e))?;
+    let obj = value.as_object().ok_or("文件内容不是一个 JSON 对象")?;
+    if !obj.get("categories").is_some_and(|v| v.is_array()) {
+        return Err("缺少 categories 数组，不是有效的书签数据文件".to_string());
+    }
+    if !obj.get("bookmarks").is_some_and(|v| v.is_array()) {
+        return Err("缺少 bookmarks 数组，不是有效的书签数据文件".to_string());
+    }
+    Ok(())
+}
+
+// 导出书签：弹出保存对话框，把当前数据文件另存一份到用户选择的位置
+#[tauri::command]
+async fn export_bookmarks(app: tauri::AppHandle) -> Result<bool, String> {
+    let path = fixed_bookmarks_path(&app)?;
+    let content = if path.exists() {
+        fs::read_to_string(&path).map_err(|e| e.to_string())?
+    } else {
+        r#"{"categories":[], "bookmarks":[]}"#.to_string()
+    };
+
+    let picked = app
+        .dialog()
+        .file()
+        .add_filter("JSON", &["json"])
+        .set_file_name("bookmarks-backup.json")
+        .blocking_save_file();
+
+    let Some(dest) = picked else { return Ok(false) }; // 用户取消了对话框
+    let dest_path = dest.into_path().map_err(|e| e.to_string())?;
+    fs::write(dest_path, content).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+// 导入书签：弹出打开对话框，校验格式后用选中文件的内容整体替换现有数据
+#[tauri::command]
+async fn import_bookmarks(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let picked = app
+        .dialog()
+        .file()
+        .add_filter("JSON", &["json"])
+        .blocking_pick_file();
+
+    let Some(src) = picked else { return Ok(None) }; // 用户取消了对话框
+    let src_path = src.into_path().map_err(|e| e.to_string())?;
+    let content = fs::read_to_string(&src_path).map_err(|e| e.to_string())?;
+    validate_bookmarks_shape(&content)?;
+
+    let dest_path = fixed_bookmarks_path(&app)?;
+    rotate_backup(&app, &dest_path);
+    fs::write(dest_path, &content).map_err(|e| e.to_string())?;
+    Ok(Some(content))
 }
 
 // 4. 解析 URL 自动获取描述 API
@@ -267,9 +361,12 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             load_bookmarks,
             save_bookmarks,
+            export_bookmarks,
+            import_bookmarks,
             fetch_website_description,
             fetch_website_meta,
         ])
@@ -386,5 +483,22 @@ mod tests {
         assert!(!is_public_ip("::1".parse().unwrap()));
         assert!(is_public_ip("8.8.8.8".parse().unwrap()));
         assert!(is_public_ip("1.1.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn validate_bookmarks_shape_accepts_well_formed_data() {
+        assert!(validate_bookmarks_shape(r#"{"categories":[],"bookmarks":[]}"#).is_ok());
+        assert!(validate_bookmarks_shape(
+            r#"{"categories":[{"id":0,"name":"全部"}],"bookmarks":[{"id":1,"title":"x","url":"https://x.com","category":"全部","description":""}]}"#
+        ).is_ok());
+    }
+
+    #[test]
+    fn validate_bookmarks_shape_rejects_malformed_data() {
+        assert!(validate_bookmarks_shape("not json").is_err());
+        assert!(validate_bookmarks_shape("[]").is_err());
+        assert!(validate_bookmarks_shape(r#"{"categories":[]}"#).is_err());
+        assert!(validate_bookmarks_shape(r#"{"bookmarks":[]}"#).is_err());
+        assert!(validate_bookmarks_shape(r#"{"categories":"nope","bookmarks":[]}"#).is_err());
     }
 }
