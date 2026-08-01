@@ -180,36 +180,9 @@ const confirmRenameCategory = async (item: Category) => {
 }
 
 // ==================== 书签 ====================
-const bookmarks = ref<BookmarkItem[]>([
-  {
-    id: 1,
-    title: 'GitHub',
-    url: 'https://github.com',
-    category: '工作/学习',
-    description: '全球最大的代码托管与开源协作社区'
-  },
-  {
-    id: 2,
-    title: '百度',
-    url: 'https://www.baidu.com',
-    category: '工作/学习',
-    description: '全球领先的中文搜索引擎'
-  },
-  {
-    id: 3,
-    title: 'Vue.js 官网',
-    url: 'https://vuejs.org',
-    category: '开发工具',
-    description: '渐进式 JavaScript 框架，易学易用'
-  },
-  {
-    id: 4,
-    title: 'Tauri 官网',
-    url: 'https://tauri.app',
-    category: '开发工具',
-    description: '打造更小、更快、更安全的跨平台桌面应用'
-  }
-])
+// 首次启动、本地又没有已保存数据时的状态：保持真正的空列表，
+// 不要放示例书签进来，否则会被误认成是已经导入的真实数据
+const bookmarks = ref<BookmarkItem[]>([])
 
 const currentCategoryBookmarks = computed(() => {
   if (currentCategoryName.value === '全部') return bookmarks.value
