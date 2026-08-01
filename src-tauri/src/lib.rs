@@ -111,45 +111,43 @@ fn toggle_main_window(app: &tauri::AppHandle) {
 }
 
 // 1. 确定 bookmarks.json 存放的具体路径
-// 便携版：数据文件默认放在可执行文件同级目录，整个文件夹搬去哪台电脑都带着数据走
-// （注意：CARGO_MANIFEST_DIR 只在 cargo/`tauri dev` 启动时才存在，打包后的 exe 里没有这个环境变量）
-fn portable_bookmarks_path() -> Result<PathBuf, String> {
-    let exe_path = env::current_exe().map_err(|e| e.to_string())?;
-    let exe_dir = exe_path.parent().ok_or("无法找到可执行文件所在目录")?;
-    Ok(exe_dir.join("bookmarks.json"))
-}
-
-// 部分安装方式（如 MSI 默认装到 Program Files）下，可执行文件目录对普通用户只读，
-// 便携路径写不进去时改存到系统的应用数据目录（Windows: %APPDATA%\<identifier>）
-fn fallback_bookmarks_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+// 固定存放在系统应用数据目录（Windows: %APPDATA%\<identifier>），不再跟着可执行文件走。
+// 好处：卸载时可以整目录一起删/留（见安装包的 uninstall 钩子），且不会因为重新编译、
+// 重装等操作把 target/ 或安装目录清空而连带丢失数据（之前的便携方案就吃过这个亏）。
+fn fixed_bookmarks_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir.join("bookmarks.json"))
 }
 
-// 读取时优先用已经存在数据的那个位置，避免因为回退逻辑导致"数据换地方了找不到"
-fn resolve_existing_bookmarks_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    let portable = portable_bookmarks_path()?;
-    if portable.exists() {
-        return Ok(portable);
+// 仅用于从旧版本（数据曾经存放在可执行文件同级目录，即"便携版"方案）一次性迁移过来
+fn legacy_portable_bookmarks_path() -> Option<PathBuf> {
+    let exe_path = env::current_exe().ok()?;
+    let exe_dir = exe_path.parent()?;
+    let path = exe_dir.join("bookmarks.json");
+    if path.exists() { Some(path) } else { None }
+}
+
+// 启动时调用一次：固定位置还没有数据、但旧的便携路径下有，就搬过去
+fn migrate_legacy_data_if_needed(app: &tauri::AppHandle) {
+    let Ok(fixed_path) = fixed_bookmarks_path(app) else { return };
+    if fixed_path.exists() {
+        return;
     }
-    let fallback = fallback_bookmarks_path(app)?;
-    if fallback.exists() {
-        return Ok(fallback);
+    if let Some(legacy_path) = legacy_portable_bookmarks_path() {
+        let _ = fs::copy(&legacy_path, &fixed_path);
     }
-    // 两边都还没有数据（全新安装）：默认仍然优先尝试便携路径
-    Ok(portable)
 }
 
 // 2. 读取书签 API
 #[tauri::command]
 fn load_bookmarks(app: tauri::AppHandle) -> Result<String, String> {
-    let path = resolve_existing_bookmarks_path(&app)?;
+    let path = fixed_bookmarks_path(&app)?;
     if path.exists() {
         // 如果文件存在，直接读取内容
         fs::read_to_string(path).map_err(|e| e.to_string())
     } else {
-        // 如果文件不存在，返回一个初始化的空 JSON 字符串
+        // 如果文件不存在（含全新安装），返回一个初始化的空 JSON 字符串
         Ok(r#"{"categories":[], "bookmarks":[]}"#.to_string())
     }
 }
@@ -157,16 +155,8 @@ fn load_bookmarks(app: tauri::AppHandle) -> Result<String, String> {
 // 3. 保存书签 API
 #[tauri::command]
 fn save_bookmarks(app: tauri::AppHandle, content: String) -> Result<(), String> {
-    let path = resolve_existing_bookmarks_path(&app)?;
-    match fs::write(&path, &content) {
-        Ok(()) => Ok(()),
-        // 便携路径不可写（多为安装到只读目录）：自动改存到应用数据目录再重试一次
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            let fallback = fallback_bookmarks_path(&app)?;
-            fs::write(&fallback, &content).map_err(|e| e.to_string())
-        }
-        Err(e) => Err(e.to_string()),
-    }
+    let path = fixed_bookmarks_path(&app)?;
+    fs::write(path, content).map_err(|e| e.to_string())
 }
 
 // 4. 解析 URL 自动获取描述 API
@@ -284,6 +274,9 @@ pub fn run() {
             fetch_website_meta,
         ])
         .setup(|app| {
+            // 旧版本（便携路径）数据一次性迁移到固定的应用数据目录
+            migrate_legacy_data_if_needed(app.handle());
+
             // 开机自启动：只注册一次，后续启动跳过
             let autostart = app.autolaunch();
             if !autostart.is_enabled().unwrap_or(false) {
