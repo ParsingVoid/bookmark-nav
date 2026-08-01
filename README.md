@@ -1,0 +1,45 @@
+# bookmark-nav
+
+A small portable desktop bookmark manager built with [Tauri](https://tauri.app) + Vue 3 + TypeScript. It runs as a tray app: a global hotkey (`Alt+Space`) toggles a window where you can organize bookmarks into categories, search them, and add new ones — with title, description, and favicon auto-fetched from the URL.
+
+## Features
+
+- Categorized bookmarks with instant search/filter
+- System tray icon + global `Alt+Space` shortcut to show/hide the window
+- Launches at login (autostart)
+- Add a bookmark by URL only — title, meta description, and favicon are fetched automatically
+- Portable: no installer-managed app-data folder — your data travels with the app
+
+## Data storage
+
+Bookmarks are stored in a `bookmarks.json` file next to the app's executable (not in a system app-data directory), so the whole folder can be copied between machines and keeps working. In development (`pnpm tauri dev`), that means `src-tauri/target/debug/bookmarks.json`.
+
+## Prerequisites
+
+- [Node.js](https://nodejs.org/) 18+
+- [pnpm](https://pnpm.io/)
+- Rust toolchain + [Tauri's platform prerequisites](https://tauri.app/start/prerequisites/) for your OS
+
+## Getting started
+
+```sh
+pnpm install
+pnpm tauri dev
+```
+
+## Building
+
+```sh
+pnpm tauri build
+```
+
+Produces a platform-native installer/bundle in `src-tauri/target/release/bundle/`.
+
+## Tech stack
+
+- Frontend: Vue 3, TypeScript, Vite, Tailwind CSS
+- Shell/backend: Tauri v2 (Rust) — handles reading/writing `bookmarks.json` and fetching page metadata for new bookmarks
+
+## License
+
+MIT — see [LICENSE](LICENSE).
