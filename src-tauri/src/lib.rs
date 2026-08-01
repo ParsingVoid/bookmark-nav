@@ -225,9 +225,9 @@ async fn export_bookmarks(app: tauri::AppHandle) -> Result<bool, String> {
         .file()
         .add_filter("JSON", &["json"])
         .set_file_name("bookmarks-backup.json");
-    // 默认定位到桌面 —— 之前手动备份数据时就是存在这里的
-    if let Ok(desktop_dir) = app.path().desktop_dir() {
-        dialog = dialog.set_directory(desktop_dir);
+    // 默认定位到实际存放数据的应用数据目录（fixed_bookmarks_path 所在的目录）
+    if let Ok(data_dir) = app.path().app_data_dir() {
+        dialog = dialog.set_directory(data_dir);
     }
     let picked = dialog.blocking_save_file();
 
@@ -240,11 +240,12 @@ async fn export_bookmarks(app: tauri::AppHandle) -> Result<bool, String> {
 // 导入书签：弹出打开对话框，校验格式后用选中文件的内容整体替换现有数据
 #[tauri::command]
 async fn import_bookmarks(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    let picked = app
-        .dialog()
-        .file()
-        .add_filter("JSON", &["json"])
-        .blocking_pick_file();
+    let mut dialog = app.dialog().file().add_filter("JSON", &["json"]);
+    // 默认定位到应用数据目录 —— 里面就有 backups/ 子目录，方便直接选一份历史备份来恢复
+    if let Ok(data_dir) = app.path().app_data_dir() {
+        dialog = dialog.set_directory(data_dir);
+    }
+    let picked = dialog.blocking_pick_file();
 
     let Some(src) = picked else { return Ok(None) }; // 用户取消了对话框
     let src_path = src.into_path().map_err(|e| e.to_string())?;
