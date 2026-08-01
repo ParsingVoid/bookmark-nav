@@ -382,9 +382,23 @@ const handleIconFile = (e: Event) => {
   reader.readAsDataURL(file)
 }
 
-const handleSubmitBookmark = async () => {
-  if (!newBookmark.value.url) return
+// 比较用的 URL 归一化：忽略协议、www. 前缀、结尾斜杠和大小写差异，
+// 这样 "https://github.com/" 和 "GitHub.com" 会被视为同一个网址
+const normalizeUrlForCompare = (url: string): string => {
+  return url.trim().toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/^www\./, '')
+    .replace(/\/+$/, '')
+}
 
+// 查找是否已经收录过相同网址的书签（编辑时排除自己）
+const findDuplicateBookmark = (url: string, excludeId: number | null) => {
+  const normalized = normalizeUrlForCompare(url)
+  if (!normalized) return null
+  return bookmarks.value.find(item => item.id !== excludeId && normalizeUrlForCompare(item.url) === normalized) || null
+}
+
+const commitBookmark = async () => {
   const finalTitle = newBookmark.value.title || getDomain(newBookmark.value.url)
   const finalDescription = newBookmark.value.description
 
@@ -418,6 +432,22 @@ const handleSubmitBookmark = async () => {
   closeBookmarkModal()
 
   await saveBookmarks({ categories: categories.value, bookmarks: bookmarks.value })
+}
+
+const handleSubmitBookmark = async () => {
+  if (!newBookmark.value.url) return
+
+  const duplicate = findDuplicateBookmark(newBookmark.value.url, editingId.value)
+  if (duplicate) {
+    showConfirmDialog(
+      '书签已存在',
+      `「${duplicate.title}」已经收录了相同的网址，仍要继续添加吗？`,
+      commitBookmark
+    )
+    return
+  }
+
+  await commitBookmark()
 }
 
 const deleteBookmark = (id: number, e: MouseEvent) => {
