@@ -855,7 +855,7 @@ onMounted(async () => {
             {{ filteredBookmarks.length }}
           </span>
           <span :class="['hidden md:inline-block text-sm font-normal', isDarkMode ? 'text-slate-400' : 'text-slate-500']">
-            {{ currentCategoryName === '全部' ? '— 浏览所有已收录的精选网站' : `— 当前分类下的专属书签` }}
+            {{ currentCategoryName === '全部' ? '— 所有已收录书签' : `— 当前分类书签` }}
           </span>
         </div>
 
