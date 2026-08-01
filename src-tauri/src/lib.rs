@@ -3,6 +3,7 @@
 
 use std::fs;
 use std::env;
+use std::net::{IpAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use reqwest;
@@ -20,12 +21,81 @@ fn get_http_client() -> &'static reqwest::Client {
     HTTP_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
+            // 每次跳转都重新校验目标地址，防止先通过校验的公网 URL 302 到内网/本机地址（SSRF）
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 5 {
+                    return attempt.stop();
+                }
+                match validate_public_url(attempt.url().as_str()) {
+                    Ok(_) => attempt.follow(),
+                    Err(_) => attempt.stop(),
+                }
+            }))
             .build()
             .expect("failed to create HTTP client")
     })
 }
 
 const MAX_BODY_BYTES: usize = 512 * 1024; // 512KB
+
+// 判断一个 IP 是否是"公网地址"：私有网段、回环、链路本地(含 169.254.169.254 云元数据端点)、
+// 组播、未指定地址等一律拒绝，防止后端被用来扫描/访问内网资源（SSRF）
+fn is_public_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_unspecified()
+                || v4.is_multicast())
+        }
+        IpAddr::V6(v6) => {
+            let segments = v6.segments();
+            let is_unique_local = (segments[0] & 0xfe00) == 0xfc00; // fc00::/7
+            let is_link_local = (segments[0] & 0xffc0) == 0xfe80; // fe80::/10
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || is_unique_local
+                || is_link_local)
+        }
+    }
+}
+
+// 校验并规范化用户传入的 URL：必须是 http/https，且解析出的所有地址都必须是公网地址
+fn validate_public_url(raw: &str) -> Result<String, String> {
+    let target_url = if raw.starts_with("http://") || raw.starts_with("https://") {
+        raw.to_string()
+    } else {
+        format!("https://{}", raw)
+    };
+
+    let parsed = reqwest::Url::parse(&target_url).map_err(|e| format!("无效的 URL: {}", e))?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err("仅支持 http/https 协议".to_string());
+    }
+    let host = parsed.host_str().ok_or("URL 缺少主机名")?;
+    let port = parsed.port_or_known_default().unwrap_or(443);
+
+    let addrs = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| format!("域名解析失败: {}", e))?;
+
+    let mut resolved_any = false;
+    for addr in addrs {
+        resolved_any = true;
+        if !is_public_ip(addr.ip()) {
+            return Err("出于安全考虑，禁止访问内网/本机地址".to_string());
+        }
+    }
+    if !resolved_any {
+        return Err("域名解析失败".to_string());
+    }
+
+    Ok(target_url)
+}
 
 // 显示/隐藏主窗口切换：托盘左键单击和全局热键共用同一套逻辑
 fn toggle_main_window(app: &tauri::AppHandle) {
@@ -41,17 +111,40 @@ fn toggle_main_window(app: &tauri::AppHandle) {
 }
 
 // 1. 确定 bookmarks.json 存放的具体路径
-// 便携版：数据文件放在可执行文件同级目录，整个文件夹搬去哪台电脑都带着数据走
+// 便携版：数据文件默认放在可执行文件同级目录，整个文件夹搬去哪台电脑都带着数据走
 // （注意：CARGO_MANIFEST_DIR 只在 cargo/`tauri dev` 启动时才存在，打包后的 exe 里没有这个环境变量）
-fn get_bookmarks_path() -> Result<PathBuf, String> {
+fn portable_bookmarks_path() -> Result<PathBuf, String> {
     let exe_path = env::current_exe().map_err(|e| e.to_string())?;
     let exe_dir = exe_path.parent().ok_or("无法找到可执行文件所在目录")?;
     Ok(exe_dir.join("bookmarks.json"))
 }
+
+// 部分安装方式（如 MSI 默认装到 Program Files）下，可执行文件目录对普通用户只读，
+// 便携路径写不进去时改存到系统的应用数据目录（Windows: %APPDATA%\<identifier>）
+fn fallback_bookmarks_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join("bookmarks.json"))
+}
+
+// 读取时优先用已经存在数据的那个位置，避免因为回退逻辑导致"数据换地方了找不到"
+fn resolve_existing_bookmarks_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let portable = portable_bookmarks_path()?;
+    if portable.exists() {
+        return Ok(portable);
+    }
+    let fallback = fallback_bookmarks_path(app)?;
+    if fallback.exists() {
+        return Ok(fallback);
+    }
+    // 两边都还没有数据（全新安装）：默认仍然优先尝试便携路径
+    Ok(portable)
+}
+
 // 2. 读取书签 API
 #[tauri::command]
-fn load_bookmarks() -> Result<String, String> {
-    let path = get_bookmarks_path()?;
+fn load_bookmarks(app: tauri::AppHandle) -> Result<String, String> {
+    let path = resolve_existing_bookmarks_path(&app)?;
     if path.exists() {
         // 如果文件存在，直接读取内容
         fs::read_to_string(path).map_err(|e| e.to_string())
@@ -63,20 +156,23 @@ fn load_bookmarks() -> Result<String, String> {
 
 // 3. 保存书签 API
 #[tauri::command]
-fn save_bookmarks(content: String) -> Result<(), String> {
-    let path = get_bookmarks_path()?;
-    // 将前端传过来的 JSON 字符串写入文件
-    fs::write(path, content).map_err(|e| e.to_string())
+fn save_bookmarks(app: tauri::AppHandle, content: String) -> Result<(), String> {
+    let path = resolve_existing_bookmarks_path(&app)?;
+    match fs::write(&path, &content) {
+        Ok(()) => Ok(()),
+        // 便携路径不可写（多为安装到只读目录）：自动改存到应用数据目录再重试一次
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            let fallback = fallback_bookmarks_path(&app)?;
+            fs::write(&fallback, &content).map_err(|e| e.to_string())
+        }
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 // 4. 解析 URL 自动获取描述 API
 #[tauri::command]
 async fn fetch_website_description(url: String) -> Result<String, String> {
-    let target_url = if url.starts_with("http://") || url.starts_with("https://") {
-        url
-    } else {
-        format!("https://{}", url)
-    };
+    let target_url = validate_public_url(&url)?;
 
     let client = get_http_client();
     let response = client.get(&target_url)
@@ -106,11 +202,7 @@ async fn fetch_website_description(url: String) -> Result<String, String> {
 //    带完整浏览器请求头减少被拦截概率，多标签降级（title → og:title → twitter:title）
 #[tauri::command]
 async fn fetch_website_meta(url: String) -> Result<String, String> {
-    let target_url = if url.starts_with("http://") || url.starts_with("https://") {
-        url
-    } else {
-        format!("https://{}", url)
-    };
+    let target_url = validate_public_url(&url)?;
 
     let client = get_http_client();
     let response = client.get(&target_url)
@@ -259,4 +351,47 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_loopback_and_private_ranges() {
+        assert!(validate_public_url("http://127.0.0.1").is_err());
+        assert!(validate_public_url("http://localhost").is_err());
+        assert!(validate_public_url("http://192.168.1.1").is_err());
+        assert!(validate_public_url("http://10.0.0.5").is_err());
+        assert!(validate_public_url("http://172.16.0.1").is_err());
+    }
+
+    #[test]
+    fn rejects_link_local_and_cloud_metadata_endpoint() {
+        // 169.254.169.254 是 AWS/GCP/Azure 云环境里获取实例元数据（含临时密钥）的经典 SSRF 目标
+        assert!(validate_public_url("http://169.254.169.254").is_err());
+        assert!(validate_public_url("http://169.254.1.1").is_err());
+    }
+
+    #[test]
+    fn rejects_non_http_scheme() {
+        assert!(validate_public_url("file:///etc/passwd").is_err());
+        assert!(validate_public_url("ftp://example.com").is_err());
+    }
+
+    #[test]
+    fn accepts_public_ip_literal() {
+        assert!(validate_public_url("http://8.8.8.8").is_ok());
+    }
+
+    #[test]
+    fn is_public_ip_rejects_reserved_ranges() {
+        assert!(!is_public_ip("127.0.0.1".parse().unwrap()));
+        assert!(!is_public_ip("10.1.2.3".parse().unwrap()));
+        assert!(!is_public_ip("192.168.0.1".parse().unwrap()));
+        assert!(!is_public_ip("169.254.169.254".parse().unwrap()));
+        assert!(!is_public_ip("::1".parse().unwrap()));
+        assert!(is_public_ip("8.8.8.8".parse().unwrap()));
+        assert!(is_public_ip("1.1.1.1".parse().unwrap()));
+    }
 }

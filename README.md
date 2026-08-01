@@ -12,9 +12,13 @@ A small portable desktop bookmark manager built with [Tauri](https://tauri.app) 
 
 ## Data storage
 
-Bookmarks are stored in a `bookmarks.json` file next to the app's executable (not in a system app-data directory), so the whole folder can be copied between machines and keeps working. In development (`pnpm tauri dev`), that means `src-tauri/target/debug/bookmarks.json`.
+Bookmarks are stored in a `bookmarks.json` file next to the app's executable (not in a system app-data directory), so the whole folder can be copied between machines and keeps working. In development (`pnpm tauri dev`), that means `src-tauri/target/debug/bookmarks.json`. If that location isn't writable (e.g. installed to `Program Files`), it automatically falls back to the OS app-data directory instead.
 
 `src-tauri/bookmarks.json` in this repo is just seed/example data (not read directly by the app) showing the expected shape — copy it next to your built executable to start with some sample bookmarks instead of an empty list.
+
+## Security
+
+The "fetch title/description/favicon from a URL" feature validates that a URL (and every redirect it follows) resolves to a public IP address before the Rust backend requests it, rejecting private/loopback/link-local ranges to prevent it being used to probe internal network services. See `cargo test` in `src-tauri/`.
 
 ## Prerequisites
 
