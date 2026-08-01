@@ -3,6 +3,8 @@ import { ref, computed, watch, onMounted, onUnmounted, type Component } from 'vu
 import { invoke } from '@tauri-apps/api/core'
 import { saveBookmarks, loadBookmarks, exportBookmarks, importBookmarks } from './utils/storage'
 import { openUrl } from '@tauri-apps/plugin-opener'
+import { check as checkForUpdate } from '@tauri-apps/plugin-updater'
+import { relaunch } from '@tauri-apps/plugin-process'
 import {
   Search, Plus, Trash2, Pencil, Bookmark, X, Compass, Briefcase, Tv, Wrench,
   ArrowUpRight, FolderPlus, Folder, FileQuestion, SearchX, Sun, Moon, RotateCw,
@@ -695,6 +697,30 @@ onMounted(async () => {
     }))
     // 恢复后统一停在“全部”，避免侧边栏高亮和数据对不上
     activeIndex.value = 0
+  }
+})
+
+// ==================== 检查更新 ====================
+onMounted(async () => {
+  try {
+    const update = await checkForUpdate()
+    if (!update) return
+    showConfirmDialog(
+      `发现新版本 ${update.version}`,
+      update.body || '是否现在下载并安装？安装完成后应用会自动重启。',
+      async () => {
+        try {
+          showToast('正在下载更新...')
+          await update.downloadAndInstall()
+          await relaunch()
+        } catch (e) {
+          showToast('更新失败: ' + e)
+        }
+      }
+    )
+  } catch (e) {
+    // 检查更新失败（比如断网）不影响正常使用，只在控制台记录
+    console.warn('检查更新失败:', e)
   }
 })
 </script>

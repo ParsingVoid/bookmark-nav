@@ -41,6 +41,12 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Used to sign updater artifacts (bundle.createUpdaterArtifacts in
+          # tauri.conf.json) so the app can verify updates against the pubkey
+          # embedded there. Must be the raw key content, not a file path —
+          # the *_PATH variant is silently ignored during the build/sign step.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "bookmark-nav ${{ github.ref_name }}"
