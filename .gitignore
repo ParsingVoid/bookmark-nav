@@ -12,10 +12,9 @@ dist
 dist-ssr
 *.local
 
-# Local bookmark data (portable app writes this next to the executable;
-# kept here at repo root only as example/seed content, not live user data)
+# Local bookmark data (portable app writes this next to the executable
+# it's running from, e.g. target/debug or target/release — never here)
 /bookmarks.json
-src-tauri/bookmarks.json
 
 # Editor directories and files
 .vscode/*
