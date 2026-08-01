@@ -220,12 +220,16 @@ async fn export_bookmarks(app: tauri::AppHandle) -> Result<bool, String> {
         r#"{"categories":[], "bookmarks":[]}"#.to_string()
     };
 
-    let picked = app
+    let mut dialog = app
         .dialog()
         .file()
         .add_filter("JSON", &["json"])
-        .set_file_name("bookmarks-backup.json")
-        .blocking_save_file();
+        .set_file_name("bookmarks-backup.json");
+    // 默认定位到桌面 —— 之前手动备份数据时就是存在这里的
+    if let Ok(desktop_dir) = app.path().desktop_dir() {
+        dialog = dialog.set_directory(desktop_dir);
+    }
+    let picked = dialog.blocking_save_file();
 
     let Some(dest) = picked else { return Ok(false) }; // 用户取消了对话框
     let dest_path = dest.into_path().map_err(|e| e.to_string())?;
